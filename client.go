@@ -2,6 +2,7 @@ package appstore
 
 import (
 	"context"
+	"net/url"
 	"time"
 )
 
@@ -54,59 +55,74 @@ func New(ctx context.Context, apple AppleConfig, googleCfg GoogleConfig) (*Clien
 	return c, nil
 }
 
+// FetchAppleOptions 定义了拉取苹果评论的高级配置。
+type FetchAppleOptions struct {
+	// 期望获取的最大评论数量。0 表示不限制
+	Limit int
+	// 期望获取的时间窗口。0 表示不限制时间
+	Since time.Duration
+	// 每页拉取数量 (1-200)，默认 200
+	PerPage int
+	// 排序方式，默认 "-createdDate"
+	Sort string
+	// 额外的查询参数（例如 url.Values{"filter[rating]": {"1"}} 过滤一星评论）
+	QueryParams url.Values
+	// 接收到一页数据后的回调函数。如果返回 false，将中止拉取
+	OnPage func(items []ReviewItem) bool
+}
+
+// FetchGoogleOptions 定义了拉取谷歌评论的高级配置。
+type FetchGoogleOptions struct {
+	// 期望获取的最大评论数量。0 表示不限制
+	Limit int
+	// 期望获取的时间窗口。0 表示不限制时间
+	Since time.Duration
+	// 翻译语言参数
+	TranslationLanguage string
+	// 接收到一页数据后的回调函数。如果返回 false，将中止拉取
+	OnPage func(items []ReviewItem) bool
+}
+
 // FetchAppleReviews 获取 Apple App Store 的用户评论。
 //
 // 参数：
 //   - ctx: 上下文，用于控制请求过程
-//   - limit: 最多获取的评论数量。如果为 0，则获取指定时间窗口内的所有评论
-//   - since: 时间窗口，获取该时间段内的评论。如果为 0，默认使用 48 小时
+//   - opts: 高级查询配置，提供极大的灵活性
 //
-// 返回评论列表按创建时间倒序排列（最新的在前）。
 // 如果 Apple 配置未设置（IssuerID 为空），返回 nil, nil。
-func (c *Client) FetchAppleReviews(ctx context.Context, limit int, since time.Duration) ([]ReviewItem, error) {
+func (c *Client) FetchAppleReviews(ctx context.Context, opts *FetchAppleOptions) ([]ReviewItem, error) {
 	if c.apple.IssuerID == "" {
 		return nil, nil
 	}
-	return fetchAppleReviews(ctx, c.apple, limit, since)
+	if opts == nil {
+		opts = &FetchAppleOptions{Since: 48 * time.Hour}
+	}
+	return fetchAppleReviews(ctx, c.apple, opts)
 }
 
 // FetchGoogleReviews 获取 Google Play 的用户评论。
 //
 // 参数：
 //   - ctx: 上下文，用于控制请求过程
-//   - limit: 最多获取的评论数量。如果为 0，则获取指定时间窗口内的所有评论
-//   - since: 时间窗口，获取该时间段内的评论。如果为 0，默认使用 2 小时
+//   - opts: 高级查询配置，提供极大的灵活性
 //
-// 返回评论列表按最后修改时间排序。
 // 如果 Google 配置未设置，返回 nil, nil。
-func (c *Client) FetchGoogleReviews(ctx context.Context, limit int, since time.Duration) ([]ReviewItem, error) {
+func (c *Client) FetchGoogleReviews(ctx context.Context, opts *FetchGoogleOptions) ([]ReviewItem, error) {
 	if c.google == nil {
 		return nil, nil
 	}
-	return c.google.fetchReviews(ctx, limit, since)
+	if opts == nil {
+		opts = &FetchGoogleOptions{Since: 2 * time.Hour}
+	}
+	return c.google.fetchReviews(ctx, opts)
 }
 
 // ReplyAppleReview 向 Apple App Store 的评论提交开发者回复。
-//
-// 参数：
-//   - ctx: 上下文，用于控制请求过程
-//   - reviewID: 评论的唯一标识符
-//   - content: 回复内容
-//
-// 注意：每条评论只能回复一次，重复回复会返回错误。
 func (c *Client) ReplyAppleReview(ctx context.Context, reviewID, content string) error {
 	return replyAppleReview(ctx, c.apple, reviewID, content)
 }
 
 // ReplyGoogleReview 向 Google Play 的评论提交开发者回复。
-//
-// 参数：
-//   - ctx: 上下文，用于控制请求过程
-//   - reviewID: 评论的唯一标识符
-//   - content: 回复内容
-//
-// 如果 Google 配置未设置，返回 context.Canceled 错误。
-// Google Play 允许多次回复同一条评论，新回复会覆盖旧回复。
 func (c *Client) ReplyGoogleReview(ctx context.Context, reviewID, content string) error {
 	if c.google == nil {
 		return context.Canceled

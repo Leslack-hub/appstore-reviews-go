@@ -29,18 +29,27 @@ func newGoogleClient(ctx context.Context, cfg GoogleConfig) (*googleClient, erro
 	return &googleClient{svc: svc, packageName: cfg.PackageName}, nil
 }
 
-func (g *googleClient) fetchReviews(_ context.Context, limit int, since time.Duration) ([]ReviewItem, error) {
-	if since <= 0 {
-		since = 2 * time.Hour
+func (g *googleClient) fetchReviews(ctx context.Context, opts *FetchGoogleOptions) ([]ReviewItem, error) {
+	var cutoff time.Time
+	if opts.Since > 0 {
+		cutoff = time.Now().Add(-opts.Since)
 	}
-	cutoff := time.Now().Add(-since)
 	var results []ReviewItem
 	var nextPageToken string
 
+Label1:
 	for {
+		select {
+		case <-ctx.Done():
+			break Label1
+		default:
+		}
 		call := g.svc.Reviews.List(g.packageName)
 		if nextPageToken != "" {
 			call.Token(nextPageToken)
+		}
+		if opts.TranslationLanguage != "" {
+			call.TranslationLanguage(opts.TranslationLanguage)
 		}
 
 		resp, err := call.Do()
@@ -48,9 +57,10 @@ func (g *googleClient) fetchReviews(_ context.Context, limit int, since time.Dur
 			return results, fmt.Errorf("google: fetch reviews: %w", err)
 		}
 
+		var pageItems []ReviewItem
 		shouldBreak := false
 		for _, review := range resp.Reviews {
-			if limit > 0 && len(results) >= limit {
+			if opts.Limit > 0 && len(results)+len(pageItems) >= opts.Limit {
 				shouldBreak = true
 				break
 			}
@@ -63,7 +73,7 @@ func (g *googleClient) fetchReviews(_ context.Context, limit int, since time.Dur
 			if userComment.LastModified != nil {
 				reviewTime = time.Unix(userComment.LastModified.Seconds, userComment.LastModified.Nanos)
 			}
-			if !reviewTime.IsZero() && reviewTime.Before(cutoff) {
+			if !cutoff.IsZero() && !reviewTime.IsZero() && reviewTime.Before(cutoff) {
 				shouldBreak = true
 				break
 			}
@@ -82,7 +92,7 @@ func (g *googleClient) fetchReviews(_ context.Context, limit int, since time.Dur
 				originalContent = strings.TrimSpace(parts[1])
 			}
 
-			results = append(results, ReviewItem{
+			pageItems = append(pageItems, ReviewItem{
 				Platform:          PlatformGoogle,
 				ReviewId:          review.ReviewId,
 				ReviewTitle:       reviewTitle,
@@ -101,7 +111,12 @@ func (g *googleClient) fetchReviews(_ context.Context, limit int, since time.Dur
 				CreatedAt: reviewTime.Format(time.RFC3339),
 			})
 		}
-
+		results = append(results, pageItems...)
+		if opts.OnPage != nil && len(pageItems) > 0 {
+			if !opts.OnPage(pageItems) {
+				break
+			}
+		}
 		if shouldBreak || resp.TokenPagination == nil || resp.TokenPagination.NextPageToken == "" {
 			break
 		}

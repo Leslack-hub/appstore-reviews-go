@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -69,22 +70,39 @@ type appleReviewResponse struct {
 	Links appleReviewLinks  `json:"links"`
 }
 
-func fetchAppleReviews(ctx context.Context, cfg AppleConfig, limit int, since time.Duration) ([]ReviewItem, error) {
+func fetchAppleReviews(ctx context.Context, cfg AppleConfig, opts *FetchAppleOptions) ([]ReviewItem, error) {
 	token, err := generateAppleToken(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("apple: generate token: %w", err)
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	nextURL := fmt.Sprintf(
-		"%s/v1/apps/%s/customerReviews?sort=-createdDate&limit=200",
-		appleConnectBaseURL, cfg.AppID,
-	)
 
-	if since <= 0 {
-		since = 48 * time.Hour
+	// 构造查询参数
+	q := url.Values{}
+	if opts.Sort != "" {
+		q.Set("sort", opts.Sort)
+	} else {
+		q.Set("sort", "-createdDate")
 	}
-	cutoff := time.Now().Add(-since)
+	if opts.PerPage > 0 {
+		q.Set("limit", strconv.Itoa(opts.PerPage))
+	} else {
+		q.Set("limit", "200")
+	}
+	for k, v := range opts.QueryParams {
+		for _, val := range v {
+			q.Add(k, val)
+		}
+	}
+
+	baseURL := fmt.Sprintf("%s/v1/apps/%s/customerReviews?%s", appleConnectBaseURL, cfg.AppID, q.Encode())
+	nextURL := baseURL
+
+	var cutoff time.Time
+	if opts.Since > 0 {
+		cutoff = time.Now().Add(-opts.Since)
+	}
 	var results []ReviewItem
 
 	for nextURL != "" {
@@ -114,21 +132,24 @@ func fetchAppleReviews(ctx context.Context, cfg AppleConfig, limit int, since ti
 		}
 		_ = resp.Body.Close()
 
+		var pageItems []ReviewItem
 		shouldBreak := false
 		for _, review := range result.Data {
 			a := review.Attributes
-			if limit > 0 && len(results) >= limit {
+			if opts.Limit > 0 && len(results)+len(pageItems) >= opts.Limit {
 				shouldBreak = true
 				break
 			}
 
-			var createdAt time.Time
-			if createdAt, err = time.Parse(time.RFC3339, a.CreatedDate); err == nil && createdAt.Before(cutoff) {
-				shouldBreak = true
-				break
+			if !cutoff.IsZero() {
+				var createdAt time.Time
+				if createdAt, err = time.Parse(time.RFC3339, a.CreatedDate); err == nil && createdAt.Before(cutoff) {
+					shouldBreak = true
+					break
+				}
 			}
 
-			results = append(results, ReviewItem{
+			pageItems = append(pageItems, ReviewItem{
 				Platform:        PlatformApple,
 				ReviewId:        review.ID,
 				ReviewTitle:     a.Title,
@@ -140,6 +161,12 @@ func fetchAppleReviews(ctx context.Context, cfg AppleConfig, limit int, since ti
 			})
 		}
 
+		results = append(results, pageItems...)
+		if opts.OnPage != nil && len(pageItems) > 0 {
+			if !opts.OnPage(pageItems) {
+				break
+			}
+		}
 		if shouldBreak {
 			break
 		}
